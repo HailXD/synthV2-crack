@@ -1,0 +1,124 @@
+{
+  "status": "Experimental partial runtime patch; built but never launched or functionally validated",
+  "reference": "RFC/1-change.md",
+  "target": {
+    "name": "synthv-studio.exe",
+    "version": "2.2.1",
+    "architecture": "AMD64",
+    "sha256": "7d81044df4827d21a1f232d2eb42d37d5ac87648abfb406a34f027e4e74ca35b",
+    "installed_file_unchanged_after_build": true
+  },
+  "artifacts": {
+    "synthv-launcher.exe": {
+      "bytes": 346624,
+      "sha256": "a0d9d1eef04654662e157f762184205b1dd62696f3b21e065f87fa413181ca7a"
+    },
+    "synthv-runtime.dll": {
+      "bytes": 11776,
+      "sha256": "55c4ab533e5e79c5567ea3b3cd44b092db10cf202bff6f88940e34eaba17a9bd"
+    }
+  },
+  "build": {
+    "command": "python -B build_runtime.py",
+    "compiler": "Scoop mingw-mstorsjo-llvm-ucrt 23.1.4-20261020",
+    "language": "C++17, Windows x64",
+    "sources": ["runtime_patch.h", "runtime_hook.cpp", "runtime_launcher.cpp", "build_runtime.py"],
+    "notes": [
+      "The production EXE and DLL were built, not merely syntax-checked",
+      "No tests, application launches, DLL injections, or runtime edits were performed during implementation",
+      "PE import inspection found only Windows system and Universal CRT dependencies",
+      "Artifacts are local ignored build outputs; tracked sources can rebuild them",
+      "The launcher embeds the SHA-256 of its matching DLL; always rebuild both together"
+    ]
+  },
+  "usage": [
+    "Keep synthv-launcher.exe and synthv-runtime.dll beside the original synthv-studio.exe",
+    "Close all Synthesizer V instances",
+    "Open synthv-launcher.exe, read the experimental warning, and type APPLY",
+    "Do not interact with the new application window until the launcher reports completion",
+    "If startup, injection, or patching fails, the launcher terminates only its newly created application process and reports an error",
+    "To use unmodified code, close the application and launch synthv-studio.exe directly",
+    "Removing the launcher and companion DLL removes this launch route; no installed-EXE restoration is necessary"
+  ],
+  "mechanism": [
+    "Refuse concurrent launchers and existing Synthesizer V processes",
+    "Hold read-only file locks while checking the original EXE and companion DLL fingerprints and starting the app",
+    "Launch the original EXE in a kill-on-close startup job without debugger attachment or privilege elevation",
+    "Wait for an idle application window and five consecutive matches of all seven 32-byte runtime guards",
+    "Find the actual image base from the new process module list; all patch addresses are RVAs, not disk offsets",
+    "Resolve the remote LoadLibraryW address from its owning system module and load the explicit companion DLL path",
+    "Start the exported worker and wait until it has passed Windows thread initialization before suspending other application threads",
+    "Verify thread ownership, pause other threads, and retry if an instruction pointer lies inside a replacement span",
+    "Recheck every guard, apply six edits, read them back, flush instruction caches, and restore page protections",
+    "On any patch failure, do not resume the paused application threads; discard the newly created process instead",
+    "On success, resume threads, wait for worker exit, release the startup job kill policy, and leave the DLL loaded for the countdown hook"
+  ],
+  "patches": [
+    {
+      "rva": "0xAB0AF0",
+      "span": 9,
+      "replacement": "b8ffffffffc3909090",
+      "intended_effect": "Return -1 from the traced note-cap getter",
+      "evidence": "The RFC traces this return into the positive-cap note-muting condition",
+      "limitation": "Also replaces the getter's original 0 result for missing or other voice states; it does not load a voice or supply engine authorization"
+    },
+    {
+      "rva": "0xAFD0E0",
+      "span": 9,
+      "replacement": "31c0c3909090909090",
+      "intended_effect": "Return false from the traced editor-trial-expiry getter",
+      "evidence": "The original function compares trial type, validity timestamp, and a separate expiry byte",
+      "limitation": "Does not establish voicebank expiry coverage or change the underlying entitlement record"
+    },
+    {
+      "rva": "0xAFD180",
+      "span": 7,
+      "replacement": "b802000000c390",
+      "intended_effect": "Return editor state 2 from the traced editor-type getter",
+      "evidence": "The original matching-record path returns 1 for trial and 2 for non-trial; its caller uses 2 for the unrestricted note-cap decision",
+      "limitation": "Does not synthesize license records, activation responses, keys, or engine data"
+    },
+    {
+      "rva": "0xB513AB",
+      "span": 6,
+      "replacement": "909090909090",
+      "intended_effect": "Skip the identified branch that appends a trial track to the export restriction list",
+      "evidence": "A type-1 comparison precedes the branch; its destination appends the current track index",
+      "limitation": "The complete export consumer chain and actual rendered audio remain unvalidated"
+    },
+    {
+      "rva": "0xD528D6",
+      "span": 2,
+      "replacement": "9090",
+      "intended_effect": "Skip the identified branch collecting a trial voice for the rendering-disabled warning",
+      "evidence": "The type-1 branch leads to collection of the voice name; fallthrough retains the normal cleanup path",
+      "limitation": "Suppressing this warning does not establish successful rendering"
+    },
+    {
+      "rva": "0xDAD190",
+      "span": 15,
+      "replacement": "FF 25 00 00 00 00 followed by the 64-bit companion hook address and one NOP",
+      "intended_effect": "Construct the English string Trial expires in \u221e days in the caller-supplied output object",
+      "evidence": "The original function uses RDX as the output-string address and returns that address in RAX; both direct callers consume and release that string",
+      "constructor_rva": "0x7FCED0",
+      "constructor_evidence": "The guarded constructor accepts an output object, character buffer, and length, allocates using the application allocator, and invokes the UTF-8 decoding path at RVA 0x808A30",
+      "limitation": "The replacement always returns English text, bypasses localization, and has not been exercised in the UI"
+    }
+  ],
+  "outstanding_rfc_requirements": [
+    "Offline rendering, including fresh starts without a connection",
+    "Voicebank expiry handling and engine-side authorization",
+    "Remaining trial restrictions and raw or inlined entitlement-state consumers",
+    "Refresh behavior for decisions cached before runtime patch installation",
+    "Localized infinity text",
+    "Playback, export, saving, reopening, and behavior with licensed voices",
+    "Compatibility with the application's integrity and anti-injection behavior"
+  ],
+  "side_effect_scope": [
+    "The patch code does not write the installed EXE, voicebank files, activation stores, network responses, registry settings, or system clock",
+    "The original application may still perform its own normal disk and network operations",
+    "Ending the process removes code edits but does not undo normal application settings or project changes",
+    "Byte and hash checks establish code identity, not functional correctness or completion of the RFC",
+    "The original on-disk patch_synthv.py utility is unchanged and still has no on-disk patch manifest"
+  ]
+}
