@@ -2,7 +2,7 @@
 
 ## Status
 
-Blocked on verified patch discovery. `patch_synthv.py` implements a guarded byte-patch and restoration mechanism, not a working trial bypass. No patch manifest is supplied because no effective patch locations have been established. Neither the executable nor the voicebank was modified.
+Blocked on verified enforcement changes and a persistent patch strategy for the packed executable. Runtime analysis has located readable code, trial-related strings, and instruction references, but not a complete bypass. `patch_synthv.py` still implements only a guarded byte-patch and restoration mechanism. No patch manifest is supplied. No patch was applied to the executable or voicebank.
 
 ## Requested behavior
 
@@ -40,9 +40,77 @@ The voicebank was not inspected or modified. Its format, encryption, trial statu
 
 The PE section table reports zero raw size and zero raw file offset for the original `.text`, `.rdata`, `.data`, `.pdata`, `.fptable`, `_RDATA`, and `.gTs` sections. File-backed sections include `.jj/`, `.]lt`, and `.rsrc`. This layout indicates packing; the specific packer has not been identified.
 
-An ASCII string scan found no matches for trial, expiry, the requested note limits, or offline/internet-connection restriction messages. This does not establish that the strings are absent at runtime: they could be encoded, localized, compressed, or generated dynamically. UTF-16 strings and runtime memory were not examined.
+Initial on-disk ASCII and subsequent UTF-16 string scans found no relevant trial messages. Runtime inspection subsequently recovered relevant ASCII strings from the unpacked `.rdata` section, as detailed below.
 
 The executable contains a certificate table, but its signature validity was not checked. Code changes normally invalidate Authenticode verification and may also trigger application integrity checks.
+
+## Tool installation and subsequent runtime analysis
+
+Installed through Scoop, with package hashes checked by Scoop:
+
+| Tool | Version | Bucket |
+| --- | --- | --- |
+| Detect It Easy | 3.21 | extras |
+| x64dbg | 2026-05-27_12-11 | extras |
+| Process Monitor | 4.12 | sysinternals |
+| Ghidra | 12.2-20261016 | extras |
+
+The extras and sysinternals buckets were added. Existing Java and javac report version 27.0.1. The installed Ghidra application properties specify minimum Java 25, despite the older JDK 21 recommendation in the Scoop manifest. Ghidra and Process Monitor were installed but not used for analysis in this iteration.
+
+### Packing and debugger behavior
+
+Commands used:
+
+```text
+diec -d -u -g -j "C:\Program Files\Synthesizer V Studio 2 Pro\synthv-studio.exe"
+diec -d -u -g -e -i -j "C:\Program Files\Synthesizer V Studio 2 Pro\synthv-studio.exe"
+```
+
+DiE reports generic protection and generic packing, not a named packer. The `.]lt` section has entropy approximately 7.9488 bits per byte. Entropy alone does not distinguish compression from encryption.
+
+This x64dbg distribution includes `release\x64\headless.exe`. Its stdin accepts debugger commands. Launching with a temporary `-userdir`, issuing `init` for the executable, and continuing past the system breakpoint reaches TLS callback 1 at RVA `0x1f0ce81`. Continuing from that callback caused process termination with exit code `0xDEADC0DE`, before callback 2 was reached. Anti-debug or integrity handling is a plausible explanation, not a confirmed diagnosis. The temporary debugger settings and database were removed after shutdown.
+
+### Read-only runtime inspection
+
+A normal, non-debugged launch exposed readable unpacked code. Analysis used Python `ctypes` with `OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION)` and `ReadProcessMemory`; it did not request memory-write access. Separate analysis-created instances were opened and closed. No existing user process was attached to or closed. Normal application startup can perform its own settings or network activity; this was not traced.
+
+Reproduction outline:
+
+1. Verify the pinned executable fingerprint and ensure no existing application instance interferes with startup
+2. Launch the executable normally with the installation directory as its working directory
+3. Wait approximately 10–12 seconds and verify the process remains alive
+4. Determine the loaded image base; it was `0x140000000` in the observed runs
+5. Read `.text` at RVA `0x1000`, length `0x11f9c0c`, and `.rdata` at RVA `0x11fb000`, length `0x687cdc`
+6. Extract relevant ASCII strings and inspect RIP-relative instruction references with Capstone
+7. Close only the analysis-created instance, release process handles, and verify the installed file fingerprint remains unchanged
+
+Both sections contained substantial nonzero data. No runtime memory patch was attempted. No persistent memory dump was retained. The installed executable still hashes to the pinned original value, and no analysis-created application or debugger process remained running at the final process check.
+
+### String and instruction reference inventory
+
+All addresses below are RVAs in the observed runtime image, not patchable file offsets. Instruction references were identified from RIP-relative `lea` patterns. This inventory is an investigation aid, not a patch manifest.
+
+| Subject | String RVA | Referencing instruction RVA |
+| --- | --- | --- |
+| Voice trial: 40 notes per group | `0x1383920` | `0xcf8dd9` |
+| Editor trial: 1,000 notes per group | `0x1383a30` | `0xcf9010` |
+| Second voice-limit message | `0x1384a60` | `0xd0106f` |
+| Second editor-limit message | `0x1384b00` | `0xd0118e` |
+| Trial voice: rendering disabled | `0x138ad40` | `0xd52b02` |
+| Trial voice tracks muted for export | `0x1595d60` | `0xb50e0c`, `0xb51a3d` |
+| Expired editor: more than one track requires a license | `0x15a1680` | `0x77fc0d` |
+| Trial countdown in days | `0x1395490` | `0xdad249` |
+| Trial countdown in hours | `0x1395428` | `0xdad32e` |
+| Voice trial requires an active internet connection | `0x1358df0` | `0xae737d` |
+| `hasExpiredTrialLicense` identifier | `0x137e7e8` | `0xcd9648` |
+
+The actual editor message says that 1,000 notes per group is an editor-trial limit. It does not establish the unrestricted product limit. Another string explicitly says trial voices are unavailable offline, while offline licenses enable permanently licensed voices. A single number replacement cannot be assumed to cover these different restrictions.
+
+Disassembly around the countdown reference suggests a function beginning at RVA `0xdad190`. It obtains license/time data, compares a state field against `1`, calculates remaining time, and selects hours versus days formatting. Calls at RVAs `0xdad1cd`, `0xdad1d5`, and `0xdad1e2` lead to RVAs `0x703b10`, `0xaf2150`, and `0x717550`. Their complete semantics remain unverified.
+
+A candidate function beginning at RVA `0xcf8ce0` formats note-limit messages and calls RVA `0xcf9470` before selecting a message. A candidate function beginning at RVA `0xd52a10` formats the rendering-disabled warning. These are not yet demonstrated to enforce the underlying limits; bypassing a warning may leave rendering unchanged.
+
+Candidate function boundaries were inferred from padding and coherent disassembly, not verified unwind records. The runtime bytes at the original `.pdata` location did not yield usable function bounds in the attempted parsing, so they must not be treated as a reliable exception table without further analysis.
 
 ## Missing evidence
 
@@ -117,7 +185,7 @@ Restoration guarantees intended byte identity, not restoration of every filesyst
 
 ## Future acceptance criteria
 
-No compilation checks, tests, application launches, or functional validation were performed, in accordance with the project instructions. The following are future acceptance criteria, not completed results:
+No compilation checks or tests were run. Applications were launched for the runtime analysis described above, but no modified build, rendering behavior, or trial bypass was functionally validated. The following are future acceptance criteria, not completed results:
 
 - Verify application and voicebank trial states independently, including expired states
 - Verify note groups above 40 notes and at the requested 1,000-note boundary
