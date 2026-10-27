@@ -1,0 +1,100 @@
+{
+  "status": "No new offline-rendering bypass; separate diagnostic binaries built but not launched",
+  "user_observations": {
+    "countdown": "The user confirms the infinity text appears",
+    "offline_rendering": "The user still receives: An active internet connection is required to trial Synthesizer V voices",
+    "other_changes": "Not individually validated; the countdown result does not validate them"
+  },
+  "scope": {
+    "running_application": "Not opened, attached to, paused, changed, or closed during this investigation",
+    "analysis_inputs": "Existing fingerprint-checked .analysis/text.bin and .analysis/rdata.bin captures and the existing Ghidra project",
+    "installed_executable": "Unchanged; original SHA-256 verified",
+    "original_launcher_pair": "Unchanged; both prior artifact SHA-256 values verified",
+    "activation_and_voicebank_files": "Not read or modified",
+    "validation": "Production diagnostic binaries were built; no application launches, injection attempts, or functional tests were performed"
+  },
+  "static_findings": [
+    {
+      "subject": "Offline dialog is downstream of failed processing",
+      "addresses": ["0xB35820", "0xB3596D", "0xB35996", "0xB35C8C"],
+      "finding": "The wrapper contains a separate continuation returning status 3, and the scheduler checks that status before queuing the internet-required dialog. Normal success follows the actual processing call. Replacing status 3 with success would not perform the omitted work",
+      "limitation": "The exception metadata linking the continuation to a particular thrown type has not been recovered from the two saved sections"
+    },
+    {
+      "subject": "Engine interface and candidate concrete implementations",
+      "addresses": ["0xB6AC60", "0xAA83F0", "0xB6AF00"],
+      "finding": "The wrapper stores an engine interface at object offset 0x38. Its processing path invokes vtable slot 0x48. Shared base-method entries identify candidate derived vtables at RVAs 0x120F728, 0x1212FD8 and 0x1216918",
+      "limitation": "The runtime engine selected for the user's voicebank has not been observed"
+    },
+    {
+      "subject": "Candidate engine call chains",
+      "chains": [
+        ["vtable 0x1212FD8 + 0x48", "0xA2150", "0x102DF0"],
+        ["vtable 0x1216918 + 0x48", "0xEB5C0", "0xDE550", "0xDF050", "0x102DF0"],
+        ["vtable 0x1216918 + 0x48", "0xEB5C0", "0xDE550", "0xF89A0", "0xE1020", "0x198580"],
+        ["vtable 0x1216918 + 0x48", "0xEB5C0", "0xDE550", "0xF89A0", "0xE1020", "0x1A1C70"]
+      ],
+      "finding": "Different engine branches reach lower-level processing or processing-context creation routines; none of the current six runtime edits modifies these engine routines",
+      "limitation": "These are conditional static call paths, not an observed execution trace or proof that every listed routine enforces licensing"
+    },
+    {
+      "subject": "Obfuscated control flow blocks ordinary decompilation",
+      "addresses": ["0x102E93", "0x1985E1"],
+      "finding": "The lower-level routines calculate indirect branch targets using constants in registers, stack slots, and captured read-only data. Ghidra stops or emits incomplete control flow at these branches",
+      "limitation": "No verified local predicate has yet been isolated whose replacement both bypasses the offline restriction and preserves actual synthesis"
+    }
+  ],
+  "reproduction": {
+    "command": "python -B decompile_synthv.py",
+    "configuration": "Select TARGETS in .analysis/TraceLicense.java",
+    "properties": [
+      "Uses an absolute non-dot-prefixed Ghidra project path",
+      "Passes the console-only logging configuration through JDK_JAVA_OPTIONS",
+      "Processes the existing project with -readOnly and -noanalysis",
+      "Prints decompiled output to the console; creates no analysis log file",
+      "Ghidra may compile its analysis script as part of execution; this does not compile or launch the target application"
+    ]
+  },
+  "diagnostic_build": {
+    "command": "python -B build_runtime.py",
+    "configuration": "BUILD_DIAGNOSTIC = True",
+    "artifacts": {
+      "synthv-trace.exe": {
+        "bytes": 349184,
+        "sha256": "fdf8352c758faf1d67f70fc6bf385bf33cfaf1a144dd871f1fb54b3a2899cf64"
+      },
+      "synthv-trace.dll": {
+        "bytes": 12800,
+        "sha256": "6bcb679e9deb857e36a6c9bdc70a62fe507ae2ba2e9c054769ccb3b802dee339"
+      }
+    },
+    "behavior": [
+      "Retains exactly the same six runtime edits; no new licensing or rendering branch is bypassed",
+      "Adds a vectored observer for Microsoft C++ exception code 0xE06D7363 before suspending application threads",
+      "Enables observation only after successful installation of the six edits",
+      "Always returns EXCEPTION_CONTINUE_SEARCH; does not alter the exception, its context, or its handling",
+      "Records at most 64 immutable events in a process-memory buffer, with publication markers",
+      "Prints thread IDs, the primary mangled exception type when safely readable, throw-info RVAs, and application stack RVAs",
+      "Does not read exception-object contents, projects, audio samples, tokens, activation stores, or network payloads",
+      "Reads bounded exception type metadata only within the newly created application's main image",
+      "Keeps the diagnostic console open while the new application runs and waits for Enter after it exits",
+      "Writes no log file; closing the diagnostic console after installation does not intentionally terminate the application"
+    ],
+    "limitations": [
+      "Diagnostic observation has not been exercised; anti-injection behavior or exception-handler ordering can interfere",
+      "Stack walking can be incomplete, and type names can be unavailable",
+      "Concurrent or reentrant exceptions may be skipped to avoid recursive collection",
+      "First-chance C++ exceptions may be handled normally and are not automatically errors",
+      "Only the first 64 captured events are retained; later events require another application session",
+      "The memory buffer and observer remain until the application exits; they are not removed while hooks are active"
+    ],
+    "user_steps": [
+      "Save your work and close Synthesizer V yourself",
+      "Run synthv-trace.exe from the installation directory and type APPLY",
+      "Wait for Diagnostic capture is active before interacting with the new application",
+      "Reproduce the offline-rendering error and copy the C++ event and application stack lines from the console",
+      "Report the voicebank name/version and whether rendering with that voice works online through the original launcher",
+      "If no event lines appear, report that explicitly rather than treating absence as a successful render"
+    ]
+  }
+}

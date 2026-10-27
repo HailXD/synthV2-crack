@@ -10,9 +10,11 @@ COMPILER = (
     Path.home()
     / "scoop/apps/mingw-mstorsjo-llvm-ucrt/current/bin/x86_64-w64-mingw32-clang++.exe"
 )
-DLL_NAME = "synthv-runtime.dll"
-LAUNCHER_NAME = "synthv-launcher.exe"
-COMMON_FLAGS = ("-std=c++17", "-O2", "-static", "-Wl,--dynamicbase,--nxcompat,--no-insert-timestamp,-s")
+BUILD_DIAGNOSTIC = True
+DLL_NAME = "synthv-trace.dll" if BUILD_DIAGNOSTIC else "synthv-runtime.dll"
+LAUNCHER_NAME = "synthv-trace.exe" if BUILD_DIAGNOSTIC else "synthv-launcher.exe"
+MODE_FLAGS = ("-DSYNTHV_TRACE",) if BUILD_DIAGNOSTIC else ()
+COMMON_FLAGS = ("-std=c++17", "-O2", "-static", "-Wl,--dynamicbase,--nxcompat,--no-insert-timestamp,-s", *MODE_FLAGS)
 
 
 def build():
@@ -39,7 +41,11 @@ def build():
         os.replace(launcher, APP_DIR / LAUNCHER_NAME)
     print(f"Built: {APP_DIR / LAUNCHER_NAME}")
     print(f"Companion: {APP_DIR / DLL_NAME}")
-    print("Experimental partial patch only. No application launch or functional tests performed.")
+    print("No application launch or functional tests performed.")
+    if BUILD_DIAGNOSTIC:
+        print("Diagnostic build only; no new offline-rendering bypass. Existing launcher binaries were not replaced.")
+    else:
+        print("Experimental partial patch only.")
 
 
 if __name__ == "__main__":

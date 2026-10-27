@@ -7,7 +7,16 @@
 #include <cstdint>
 
 inline constexpr wchar_t TARGET_NAME[] = L"synthv-studio.exe";
+#ifdef SYNTHV_TRACE
+inline constexpr wchar_t DLL_NAME[] = L"synthv-trace.dll";
+inline constexpr DWORD CPP_EXCEPTION_CODE = 0xE06D7363;
+inline constexpr LONG TRACE_CAPACITY = 64;
+inline constexpr USHORT TRACE_FRAME_LIMIT = 48;
+inline constexpr SIZE_T TYPE_NAME_CAPACITY = 128;
+inline constexpr DWORD TYPE_DESCRIPTOR_NAME_OFFSET = 16;
+#else
 inline constexpr wchar_t DLL_NAME[] = L"synthv-runtime.dll";
+#endif
 inline constexpr char ORIGINAL_SHA256[] = "7d81044df4827d21a1f232d2eb42d37d5ac87648abfb406a34f027e4e74ca35b";
 inline constexpr char PATCH_EXPORT[] = "ApplyRuntimePatches";
 inline constexpr char COUNTDOWN_TEXT[] = "Trial expires in \xe2\x88\x9e days";
@@ -61,11 +70,26 @@ inline constexpr PatchSpec PATCHES[] = {
 inline constexpr SIZE_T SPEC_COUNT = sizeof(PATCHES) / sizeof(PATCHES[0]);
 inline constexpr SIZE_T PATCH_COUNT = SPEC_COUNT - 1;
 
+#ifdef SYNTHV_TRACE
+struct ExceptionTrace {
+    LONG ready;
+    DWORD thread_id;
+    uintptr_t throw_info_rva;
+    DWORD frame_count;
+    uintptr_t frames[TRACE_FRAME_LIMIT];
+};
+#endif
+
 struct SharedState {
     LONG command;
     LONG state;
     DWORD status;
     DWORD applied;
+#ifdef SYNTHV_TRACE
+    LONG tracing;
+    LONG event_count;
+    ExceptionTrace events[TRACE_CAPACITY];
+#endif
 };
 
 inline BYTE hex_digit(char value) {

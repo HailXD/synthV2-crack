@@ -1,5 +1,10 @@
 {
-  "status": "Experimental partial runtime patch; built but never launched or functionally validated",
+  "status": "Experimental partial runtime patch; user confirms infinity countdown, user reports offline rendering still fails; other behavior remains unvalidated",
+  "user_report": {
+    "infinity_countdown": "Confirmed working by user",
+    "offline_rendering": "Failed with the internet-required trial-voices message",
+    "other_edits": "Assumed working by user, not individually confirmed"
+  },
   "reference": "RFC/1-change.md",
   "target": {
     "name": "synthv-studio.exe",
@@ -20,6 +25,7 @@
   },
   "build": {
     "command": "python -B build_runtime.py",
+    "configuration": "Set BUILD_DIAGNOSTIC = False for this original pair; the current True setting builds the separate trace pair described in offline-investigation.json",
     "compiler": "Scoop mingw-mstorsjo-llvm-ucrt 23.1.4-20261020",
     "language": "C++17, Windows x64",
     "sources": ["runtime_patch.h", "runtime_hook.cpp", "runtime_launcher.cpp", "build_runtime.py"],
@@ -102,7 +108,7 @@
       "evidence": "The original function uses RDX as the output-string address and returns that address in RAX; both direct callers consume and release that string",
       "constructor_rva": "0x7FCED0",
       "constructor_evidence": "The guarded constructor accepts an output object, character buffer, and length, allocates using the application allocator, and invokes the UTF-8 decoding path at RVA 0x808A30",
-      "limitation": "The replacement always returns English text, bypasses localization, and has not been exercised in the UI"
+      "limitation": "The user confirms the infinity text appears; the replacement always returns English text and bypasses localization"
     }
   ],
   "outstanding_rfc_requirements": [

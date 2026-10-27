@@ -10,7 +10,7 @@ public class TraceLicense extends GhidraScript {
     private static final Path DATA_PATH = Path.of("C:/Program Files/Synthesizer V Studio 2 Pro/.analysis/rdata.bin");
     private static final long IMAGE_BASE = 0x140000000L;
     private static final long DATA_RVA = 0x11fb000L;
-    private static final long[] TARGETS = {0xb6af00L};
+    private static final long[] TARGETS = {0xeb5c0L, 0x102df0L, 0x198580L, 0x1a1c70L};
     private static final int TIMEOUT_SECONDS = 60;
 
     @Override

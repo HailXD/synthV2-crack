@@ -296,7 +296,7 @@ static SharedState wait_for_state(Session& session, HANDLE worker, void* remote,
     throw std::runtime_error("Companion worker timed out");
 }
 
-static void apply_runtime(Session& session, uintptr_t base, uintptr_t dll_base, uintptr_t export_offset) {
+static void* apply_runtime(Session& session, uintptr_t base, uintptr_t dll_base, uintptr_t export_offset) {
     const SharedState initial = {COMMAND_WAIT, STATE_STARTING, ERROR_SUCCESS, 0};
     void* remote = allocate_remote(session.process, &initial, sizeof(initial));
     DWORD worker_id = 0;
@@ -326,15 +326,90 @@ static void apply_runtime(Session& session, uintptr_t base, uintptr_t dll_base, 
             ("Companion patch failed (status " + std::to_string(done.status) + "); terminating only the new process").c_str());
     frozen.thaw();
     require(WaitForSingleObject(worker.value, PATCH_TIMEOUT_MS) == WAIT_OBJECT_0, "Companion worker did not exit");
-    win_require(VirtualFreeEx(session.process, remote, 0, MEM_RELEASE), "Cannot release companion status buffer");
     session.check_alive();
+#ifdef SYNTHV_TRACE
+    return remote;
+#else
+    win_require(VirtualFreeEx(session.process, remote, 0, MEM_RELEASE), "Cannot release companion status buffer");
+    return nullptr;
+#endif
 }
+
+#ifdef SYNTHV_TRACE
+static bool read_image(HANDLE process, uintptr_t base, DWORD image_size, uintptr_t rva, void* output, SIZE_T size) {
+    if (!rva || rva >= image_size || size > image_size - rva) return false;
+    SIZE_T read = 0;
+    return ReadProcessMemory(process, reinterpret_cast<void*>(base + rva), output, size, &read) && read == size;
+}
+
+static std::string exception_type(HANDLE process, uintptr_t base, DWORD image_size, uintptr_t throw_rva) {
+    DWORD info[4] = {};
+    DWORD types[2] = {};
+    DWORD first[2] = {};
+    if (!read_image(process, base, image_size, throw_rva, info, sizeof(info))
+        || !read_image(process, base, image_size, info[3], types, sizeof(types))
+        || !types[0] || types[0] > TRACE_CAPACITY
+        || !read_image(process, base, image_size, types[1], first, sizeof(first)))
+        return "(unavailable)";
+    char name[TYPE_NAME_CAPACITY] = {};
+    if (!read_image(process, base, image_size, static_cast<uintptr_t>(first[1]) + TYPE_DESCRIPTOR_NAME_OFFSET,
+                    name, sizeof(name)) || std::strncmp(name, ".?A", 3) != 0)
+        return "(unavailable)";
+    name[sizeof(name) - 1] = '\0';
+    for (const char* value = name; *value; ++value)
+        if (*value < ' ' || *value > '~') return "(unavailable)";
+    return name;
+}
+
+static void monitor_trace(Session& session, void* remote, uintptr_t base, const std::wstring& target) {
+    const DWORD image_size = find_module(session.pid, target).modBaseSize;
+    bool printed[TRACE_CAPACITY] = {};
+    bool limit_reported = false;
+    std::puts("Diagnostic capture is active. Reproduce the offline-rendering error, then copy the console output.\n"
+              "Only C++ exception types, thread IDs and application stack RVAs are shown. No log files are written.\n"
+              "First-chance exceptions can be handled normally; their presence alone does not identify a failure.");
+    std::fflush(stdout);
+    while (WaitForSingleObject(session.process, POLL_MS) == WAIT_TIMEOUT) {
+        SharedState state = {};
+        SIZE_T read = 0;
+        if (!ReadProcessMemory(session.process, remote, &state, sizeof(state), &read) || read != sizeof(state)) {
+            if (WaitForSingleObject(session.process, 0) == WAIT_OBJECT_0) break;
+            throw std::runtime_error("Cannot read diagnostic events; the running app has not been terminated");
+        }
+        const LONG count = std::min(state.event_count, TRACE_CAPACITY);
+        for (LONG i = 0; i < count; ++i) {
+            const auto& event = state.events[i];
+            if (printed[i] || !event.ready) continue;
+            printed[i] = true;
+            const auto type = exception_type(session.process, base, image_size, event.throw_info_rva);
+            std::printf("C++ event %ld: thread=%lu type=%s throw-info RVA=0x%llx\n",
+                        i + 1, event.thread_id, type.c_str(), static_cast<unsigned long long>(event.throw_info_rva));
+            std::printf("  application stack:");
+            for (DWORD frame = 0; frame < std::min<DWORD>(event.frame_count, TRACE_FRAME_LIMIT); ++frame)
+                std::printf(" 0x%llx", static_cast<unsigned long long>(event.frames[frame]));
+            if (!event.frame_count) std::printf(" (unavailable)");
+            std::putchar('\n');
+        }
+        if (count == TRACE_CAPACITY && !limit_reported) {
+            std::puts("Capture capacity reached; later exceptions will not be recorded.");
+            limit_reported = true;
+        }
+        std::fflush(stdout);
+    }
+    std::puts("Application exited. Copy the relevant output before pressing Enter to close.");
+    std::getchar();
+}
+#endif
 
 int wmain() {
     std::puts("Experimental Synthesizer V runtime patch\n"
               "Offline rendering and expired voicebanks are NOT established. This is not the complete RFC.\n"
               "The installed EXE is not edited. The app may perform its normal settings/network activity.\n"
               "Close this window to cancel, or type APPLY and press Enter to launch.");
+#ifdef SYNTHV_TRACE
+    std::puts("This diagnostic build adds exception observation, NOT an offline-rendering fix.\n"
+              "Do not interact with the new application until diagnostic capture is active.");
+#endif
     char confirmation[16] = {};
     if (!std::fgets(confirmation, sizeof(confirmation), stdin) || std::strcmp(confirmation, "APPLY\n") != 0) return 0;
     try {
@@ -371,10 +446,13 @@ int wmain() {
         std::puts("Waiting for unpacked code and an idle application window...");
         const uintptr_t base = wait_for_unpack(session, target);
         const uintptr_t dll_base = inject_library(session, dll_path);
-        apply_runtime(session, base, dll_base, export_offset);
+        void* trace = apply_runtime(session, base, dll_base, export_offset);
         session.release();
-        std::puts("Six runtime edits installed; functional behavior remains unvalidated.\n"
+        std::puts("Six runtime edits installed; byte verification does not establish functional correctness.\n"
                   "For an unmodified session, close the app and launch synthv-studio.exe directly.");
+#ifdef SYNTHV_TRACE
+        monitor_trace(session, trace, base, target);
+#endif
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "Error: %s\nThe installed executable was not changed.\nPress Enter to close.\n", error.what());

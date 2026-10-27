@@ -3,6 +3,42 @@
 static BYTE* IMAGE_BASE = nullptr;
 static LONG APPLIED = 0;
 
+#ifdef SYNTHV_TRACE
+static SharedState* TRACE_STATE = nullptr;
+static LONG CAPTURE_BUSY = 0;
+static DWORD IMAGE_SIZE = 0;
+
+static bool image_address(uintptr_t address) {
+    const uintptr_t base = reinterpret_cast<uintptr_t>(IMAGE_BASE);
+    return address >= base && address - base < IMAGE_SIZE;
+}
+
+static LONG CALLBACK observe_exception(EXCEPTION_POINTERS* exception) {
+    if (!TRACE_STATE || !InterlockedCompareExchange(&TRACE_STATE->tracing, 0, 0)
+        || exception->ExceptionRecord->ExceptionCode != CPP_EXCEPTION_CODE)
+        return EXCEPTION_CONTINUE_SEARCH;
+    if (InterlockedCompareExchange(&CAPTURE_BUSY, 1, 0)) return EXCEPTION_CONTINUE_SEARCH;
+    if (TRACE_STATE->event_count < TRACE_CAPACITY) {
+        const LONG index = InterlockedIncrement(&TRACE_STATE->event_count) - 1;
+        auto& event = TRACE_STATE->events[index];
+        event.thread_id = GetCurrentThreadId();
+        const auto* record = exception->ExceptionRecord;
+        if (record->NumberParameters >= 4 && image_address(record->ExceptionInformation[2]))
+            event.throw_info_rva = record->ExceptionInformation[2] - reinterpret_cast<uintptr_t>(IMAGE_BASE);
+        void* frames[TRACE_FRAME_LIMIT] = {};
+        const USHORT count = CaptureStackBackTrace(0, TRACE_FRAME_LIMIT, frames, nullptr);
+        for (USHORT i = 0; i < count; ++i) {
+            const uintptr_t address = reinterpret_cast<uintptr_t>(frames[i]);
+            if (image_address(address))
+                event.frames[event.frame_count++] = address - reinterpret_cast<uintptr_t>(IMAGE_BASE);
+        }
+        InterlockedExchange(&event.ready, 1);
+    }
+    InterlockedExchange(&CAPTURE_BUSY, 0);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
 using StringConstructor = void* (*)(void*, const char*, SIZE_T);
 
 static void* infinity_countdown(void*, void* result) {
@@ -84,6 +120,17 @@ extern "C" __declspec(dllexport) DWORD WINAPI ApplyRuntimePatches(void* paramete
         InterlockedExchange(&shared->state, STATE_DONE);
         return shared->status;
     }
+#ifdef SYNTHV_TRACE
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(IMAGE_BASE);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(IMAGE_BASE + dos->e_lfanew);
+    IMAGE_SIZE = nt->OptionalHeader.SizeOfImage;
+    TRACE_STATE = shared;
+    if (!AddVectoredExceptionHandler(0, observe_exception)) {
+        shared->status = ERROR_NOT_SUPPORTED;
+        InterlockedExchange(&shared->state, STATE_DONE);
+        return shared->status;
+    }
+#endif
     InterlockedExchange(&shared->state, STATE_READY);
     const ULONGLONG deadline = GetTickCount64() + WORKER_TIMEOUT_MS;
     while (InterlockedCompareExchange(&shared->command, COMMAND_WAIT, COMMAND_WAIT) != COMMAND_APPLY) {
@@ -96,6 +143,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI ApplyRuntimePatches(void* paramete
     }
     shared->status = apply_patches(&shared->applied);
     const DWORD status = shared->status;
+#ifdef SYNTHV_TRACE
+    if (status == ERROR_SUCCESS) InterlockedExchange(&shared->tracing, 1);
+#endif
     InterlockedExchange(&shared->state, STATE_DONE);
     return status;
 }
