@@ -2,11 +2,11 @@
 
 ## Status
 
-Blocked on a persistent patch strategy for the packed executable and unresolved offline/expiry behavior. Runtime analysis has traced the note-cap return values and a downstream per-note mute decision, plus a separate export restriction collector, but not a complete bypass. `patch_synthv.py` still implements only a guarded byte-patch and restoration mechanism. No patch manifest is supplied. No patch was applied to the executable or voicebank.
+The requested target is now permanent-license behavior for both application and voicebanks, not a 1,000-note replacement cap. Analysis has confirmed the trial/permanent enum mapping, separate expiry fields, the note-cap decision, and parts of the export/rendering paths. A persistent patch strategy for the packed executable and complete offline/expiry coverage remain unresolved. `patch_synthv.py` still implements only a guarded byte-patch and restoration mechanism. No patch manifest is supplied. No patch was applied to the executable or voicebank.
 
 ## Requested behavior
 
-- Raise the voicebank-trial note-group limit from the reported 40 notes to the reported normal limit of 1,000
+- Treat the application and voicebank paths as permanently licensed, including the `-1` no-positive-cap behavior in the traced note-limit path; do not impose a new 1,000-note cap
 - Permit rendering without internet access
 - Preserve functionality after both application and voicebank trials expire
 - Remove other trial-only restrictions after identifying them individually
@@ -55,7 +55,7 @@ Installed through Scoop, with package hashes checked by Scoop:
 | Process Monitor | 4.12 | sysinternals |
 | Ghidra | 12.2-20261016 | extras |
 
-The extras and sysinternals buckets were added. Existing Java and javac report version 27.0.1. The installed Ghidra application properties specify minimum Java 25, despite the older JDK 21 recommendation in the Scoop manifest. Ghidra and Process Monitor were installed but not used for analysis in this iteration.
+The extras and sysinternals buckets were added. Existing Java and javac report version 27.0.1. The installed Ghidra application properties specify minimum Java 25, despite the older JDK 21 recommendation in the Scoop manifest. Ghidra and Process Monitor were initially only installed. Ghidra was subsequently used for the headless decompilation described below; Process Monitor remains unused.
 
 ### Packing and debugger behavior
 
@@ -140,7 +140,7 @@ RVA `0xab0af0` is a note-cap getter. Its disassembled return decisions are:
 | `2` | Other than `2` | `1000` |
 | Other | Any | `0` |
 
-The getter obtains a voice record via RVA `0xafc730`, copies it through RVA `0x717550`, and obtains the editor state through RVA `0xafd180`. State `1` is also what the independently traced countdown and trial-export paths check. State `2` is consistent with the unrestricted/licensed case; do not assume every record or server response uses the same enum without tracing it.
+The getter obtains a voice record via RVA `0xafc730`, copies it through RVA `0x717550`, and obtains the editor state through RVA `0xafd180`. State `1` is also what the independently traced countdown and trial-export paths check. The subsequent response-parser analysis confirms that this record's state `2` means `permanent`; do not assume unrelated engine status codes use the same enum.
 
 Two direct callers were identified:
 
@@ -170,6 +170,66 @@ The TLS callback directory is at RVA `0x1ed6298`; its callback array starts at f
 The actual exception directory points to RVA `0x2e1eb20`, rather than the original `.pdata` section. The on-disk image did not yield parsed exception records through `pefile` in this attempt. The original `.pdata` capture should therefore not be used as the authoritative unwind table.
 
 No repacking, restored import/exception-table image, or post-unpacking patch hook has been established. An approach that adds sections, redirects TLS callbacks, or rebuilds a runnable image would require a new executable transformation strategy; it is not supplied by the existing equal-length byte-patch utility. There are still no verified persistent replacements to apply, and no candidate bytes were installed.
+
+## Permanent-license target and upstream tracing
+
+The user superseded the original 1,000-note target with permanent-license behavior for both the editor and voices. `-1` is the desired result in the identified note-cap getter, not a universal return value to apply indiscriminately to unrelated functions.
+
+### Confirmed license-record representation
+
+Headless Ghidra analysis and Capstone disassembly identified these record fields:
+
+| Offset | Meaning and evidence |
+| --- | --- |
+| `0x30` | License type: parser maps the literal `trial` to `1`, `permanent` to `2`, and other values to `0` |
+| `0x38` | Validity timestamp: response field `valid_to` is converted from seconds to milliseconds |
+| `0x40` | Separate status/expiry byte: consumed independently of the type in warning and expiry paths |
+
+In the response parser beginning at RVA `0xaf7290`, the trial comparison begins at `0xaf810d`, followed by the state-`1` assignment at `0xaf8128`. The permanent comparison begins at `0xaf8251`; the state-`2` selection and record assignment are at `0xaf8264` through `0xaf826c`. These are runtime code addresses, not file edits.
+
+The cached-record parser at RVA `0xaf5e80` splits semicolon-separated key/value fields. It parses `K7` into offset `0x30`, `K8` into offset `0x38`, and `K9 == "1"` into offset `0x40`. This is a second record-creation path, separate from parsing a response. Its containing reader at RVA `0xaf55f0` handles an encoded cache before parsing its records. No cache file, account data, or activation store was read or changed during this analysis.
+
+The lookup at RVA `0xafc730` searches two record collections, at manager offsets `0xa8` and `0xb8`, using different identifying fields. The merge/enumeration routine at RVA `0xafbe10` combines records and metadata from those collections. Changing only one parser or copy constructor has not been shown to cover both collections, existing records, subsequent refreshes, and inlined copies.
+
+### Editor expiry is more than the countdown
+
+Assembly at RVA `0xafd0e0` returns true when the selected editor record has type `1` and either its validity timestamp is earlier than the current time or its separate status/expiry byte is set. A record with type other than `1` takes the false-return path in this particular function. This supports the permanent-license target for this check, but is not proof of all expiry behavior.
+
+Direct callers include RVAs `0xa62310`, `0xacf8dc`, `0xb3805b`, `0xb57750`, `0xb5d6fa`, `0xb6255d`, `0xbd36f7`, `0xc77945`, `0xc7d0cc`, `0xcd7243`, `0xcd8d1f`, `0xcfade5`, `0xd35707`, `0xd3aed8`, `0xd47425`, `0xd6b0b7`, and `0xd7591c`. The getter is therefore relevant beyond the countdown display. Each caller's complete behavior remains to be classified.
+
+The countdown function itself only enters its trial-formatting path for type `1`. Making the record permanent may hide the countdown rather than display infinity. The requested infinity text remains a distinct UI requirement.
+
+### Rendering and offline investigation
+
+The rendering scheduler beginning at RVA `0xb359f0` calls RVA `0xb35820`. A returned status of `3` schedules the internet-required dialog through a callback using the vtable at RVA `0x1595748`. Other non-success statuses lead to retry, cancellation, or per-note failure handling.
+
+RVA `0xb35820` calls the substantial processing routine at `0xb6af00` for each selected range. It forwards a string from manager offset `0x30` and other processing data. The meanings of all forwarded fields are not established. Its normal success return follows actual processing; replacing it with an immediate success return would skip work, not demonstrate successful offline rendering.
+
+The processing routine calls an engine interface, including a virtual method at vtable offset `0x48`, and has independent failures such as `Voice not loaded.`, `Engine note creation failed.`, and `Engine processing failed.` The precise origin of the status-`3` path is not established by the available ordinary control-flow graph; exception handling and the concrete engine implementation still require tracing. No claim is made that relabeling a record supplies any missing engine data or removes all network dependencies.
+
+### Headless Ghidra reproducibility
+
+New analysis-only files:
+
+- `.analysis/TraceLicense.java`: Ghidra script that loads the captured `.rdata`, disassembles selected targets, creates analysis functions, and prints decompiled C to stdout
+- `analysis/console.xml`: console-only Ghidra logging configuration, with no file appenders
+- `analysis/synthv-license.gpr` and `analysis/synthv-license.rep/`: local, Git-ignored Ghidra project containing captured code and analysis metadata, not a runnable patched executable
+
+Ghidra rejects project paths with dot-prefixed components, so its project lives under `analysis`, while the captured sections and script remain under `.analysis`. Passing `-log NUL` alone produced file-appender errors; the console-only configuration prevents file logging. No `.log` files were present in the installation directory after the analysis.
+
+For a fresh project, use this PowerShell invocation from the installation directory:
+
+```powershell
+$env:JDK_JAVA_OPTIONS = '-Dlog4j.configurationFile="C:/Program Files/Synthesizer V Studio 2 Pro/analysis/console.xml"'
+$headless = 'C:/Users/jyeal/scoop/apps/ghidra/current/support/analyzeHeadless.bat'
+& $headless './analysis' 'synthv-license' -import './.analysis/text.bin' -loader BinaryLoader -loader-baseAddr 0x140001000 -processor x86:LE:64:default -cspec windows -noanalysis -scriptPath './.analysis' -postScript TraceLicense.java -log NUL -scriptlog NUL
+```
+
+For the already created project, replace the import/loader/processor/compiler options with `-process text.bin`. Select targets using the script's top-level `TARGETS` constant. Targets examined in this iteration included `0xafd0e0`, `0xafbe10`, `0xaa6890`, `0xaf55f0`, `0xaf5e80`, `0xaa6bf0`, `0xaaf210`, `0xaa4970`, `0xb33790`, `0xb357c0`, `0xaaec00`, `0xaf7290`, `0xb359f0`, and `0xb6af00`.
+
+Decompiled C is an analysis approximation: missing prototypes, exception metadata, and indirect targets can produce incorrect types, omitted return values, or misleading control flow. The editor-expiry routine's boolean return was confirmed against assembly rather than its initial decompiled signature. Ghidra compiled its native script as part of executing analysis; no application build checks or tests were run.
+
+This iteration used the existing captures and did not start or patch Synthesizer V. The permanent-license target is documented, but no verified persistent patch manifest exists. The Python patch utility remains deliberately unable to apply guessed edits.
 
 ## Missing evidence
 
@@ -247,7 +307,7 @@ Restoration guarantees intended byte identity, not restoration of every filesyst
 No compilation checks or tests were run. Applications were launched for the runtime analysis described above, but no modified build, rendering behavior, or trial bypass was functionally validated. The following are future acceptance criteria, not completed results:
 
 - Verify application and voicebank trial states independently, including expired states
-- Verify note groups above 40 notes and at the requested 1,000-note boundary
+- Verify licensed note-group behavior above both 40 and 1,000 notes without the identified positive trial cap
 - Verify actual completed renders offline, including a fresh application start
 - Verify playback, project saving, reopening, and unaffected licensed voicebanks
 - Verify the infinity countdown in relevant UI languages
