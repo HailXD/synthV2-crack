@@ -6,7 +6,9 @@ Created `patch_voice_limit.py`, a standalone Windows x64 Python runtime patcher.
 
 Created this knowledge document. No existing launcher, DLL, analysis capture, activation data, project, or installed executable was modified. The patcher was not executed, and no compilation checks or functional tests were run. Inspection of the already running application used read-only process access; the application was not launched, suspended, injected into, patched, or closed during this work.
 
-This is not a permanent on-disk EXE patch. Runtime writes occur only when the user runs the script and confirms `APPLY`. Functional behavior remains unvalidated.
+Added `Synthesizer V Studio 2 Pro.bat` for automatic launch-and-patch use. Removed the original `APPLY` prompt from the Python script and added bounded startup waiting. The batch file starts the original EXE, then invokes Python immediately; Python performs the readiness waiting before any patch writes. Neither the new launcher nor the updated script was executed during implementation.
+
+This is not a permanent on-disk EXE patch. Running the script now automatically patches the matching running app once its readiness checks pass. Functional behavior remains unvalidated.
 
 ## Exact target
 
@@ -22,14 +24,16 @@ The EXE is packed: `.text`, `.rdata`, and several other sections have zero raw-d
 
 ## Usage
 
-1. Save work. Open the original `synthv-studio.exe` and wait for the editor window. Keep only one instance of this installation running.
-2. Stop playback/rendering; avoid interacting with the app while applying the patch.
+1. Use 64-bit Python on Windows, available as `python` on PATH. The script uses only the standard library.
+2. Save work and close existing app instances before using the batch launcher.
 3. Optionally change the top-level `LIMIT` in `patch_voice_limit.py` from `-1` to `9999`.
-4. From this directory, run `python -B patch_voice_limit.py` using 64-bit Python on Windows. The script uses only the standard library.
-5. Check the displayed target/PID and type `APPLY`.
+4. Double-click `Synthesizer V Studio 2 Pro.bat`. It starts the original EXE and runs the patcher from the batch file's directory. No `APPLY` input is required.
+5. Avoid editing/playback until patching completes. The console closes on success; launch/patch failures leave the error visible with a pause. An application left open after failure may be unpatched.
 6. Reselect the voice or reopen the saved project if cached limits persist. This refresh procedure is a suggestion, not validated behavior.
 
-Run the patcher again after every application restart. Closing the app discards the runtime edit; the original EXE needs no restoration. Alternatively, set `LIMIT = 40` and apply again to restore the instruction for the current session, then refresh cached state.
+For an already open app, save work and stop playback/rendering, then run `python -B patch_voice_limit.py` directly. It also applies automatically without prompting. Do not use the batch launcher to attach to an existing instance; it starts the EXE again and the patcher rejects multiple matching instances.
+
+Use the batch launcher after every application restart, or rerun the patcher manually. Closing the app discards the runtime edit; the original EXE needs no restoration. Alternatively, set `LIMIT = 40` and apply again to restore the instruction for the current session, then refresh cached state.
 
 The script does not elevate privileges. If Windows denies process access, run the application and script at compatible privilege levels. Any unexpected runtime or hash mismatch requires fresh analysis, not removal of the guards.
 
@@ -86,9 +90,11 @@ The editor warning has its own 1000-note formatting immediate at `0xB702B7`. Exp
 
 ## Safeguards and limits
 
-The script checks the disk fingerprint, exact process path, and full runtime getter bytes before writing. Only the four-byte immediate may differ, and its previous value must be 40, 9999, or -1. It finds the live module base rather than hard-coding the observed ASLR address. It refuses zero/multiple matching instances and uses a named mutex to prevent concurrent copies of this patcher.
+The script checks the disk fingerprint, exact process path, and full runtime getter bytes before writing. Only the four-byte immediate may differ, and its previous value must be 40, 9999, or -1. It finds the live module base rather than hard-coding the observed ASLR address. It waits for a matching process, rejects multiple matching instances, and uses a named mutex to prevent concurrent copies of this patcher. Before patching, it rechecks that the selected PID is still the sole matching instance.
 
-After confirmation, it requests whole-process suspension with `NtSuspendProcess`, rechecks the bytes, temporarily changes page protection, writes only the immediate, reads it back, flushes the instruction cache, restores protection, and resumes in a `finally` block. Write failure triggers an attempt to restore the previous immediate. Native API failures are reported; a resume failure may leave the app suspended and require Task Manager intervention. Force-killing the patcher during the brief suspended interval can also leave the app suspended. Save work first.
+Startup readiness has a shared 60-second deadline (`STARTUP_TIMEOUT_SECONDS`). The script polls every 0.5 seconds (`POLL_SECONDS`) for `WaitForInputIdle` success, a visible top-level window belonging to the selected process, and matching getter bytes at the same address for five consecutive samples (`STABLE_SAMPLES`). Process exit fails immediately after selection. Unpacked-code mismatches and transient reads retry only until the deadline. These are readiness heuristics, not proof that every background task or voice download has finished. No fixed sleep alone authorizes a patch.
+
+After readiness passes, it automatically requests whole-process suspension with `NtSuspendProcess`, rechecks the bytes, temporarily changes page protection, writes only the immediate, reads it back, flushes the instruction cache, restores protection, and resumes in a `finally` block. Write failure triggers an attempt to restore the previous immediate. Native API failures are reported; a resume failure may leave the app suspended and require Task Manager intervention. Force-killing the patcher during the brief suspended interval can also leave the app suspended. Save work first.
 
 No runtime safety or audio tests have been performed. Anti-tamper behavior, caching, later code replacement, or other licensing checks can still interfere. The patch changes neither trial expiry nor the need for an active internet connection, activation, voice data, export permissions, or engine authorization. Unlimited means only the identified local note-count cap is disabled.
 

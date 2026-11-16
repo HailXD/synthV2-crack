@@ -4,6 +4,7 @@ import hashlib
 import os
 from pathlib import Path
 import struct
+import time
 
 
 APP_PATH = Path(r"C:\Program Files\Synthesizer V Studio 2 Pro\synthv-studio.exe")
@@ -24,11 +25,16 @@ PID_CAPACITY = 8192
 MODULE_CAPACITY = 2048
 PATH_CAPACITY = 32768
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-PROCESS_ACCESS = 0x400 | 0x10 | 0x20 | 0x08 | 0x800
+PROCESS_ACCESS = 0x400 | 0x10 | 0x20 | 0x08 | 0x800 | 0x100000
 LIST_MODULES_ALL = 3
 PAGE_EXECUTE_READWRITE = 0x40
 ERROR_ALREADY_EXISTS = 183
 MUTEX_NAME = r"Local\SynthV230VoiceNoteLimitPatch"
+STARTUP_TIMEOUT_SECONDS = 60
+POLL_SECONDS = 0.5
+STABLE_SAMPLES = 5
+STILL_ACTIVE = 259
+WAITING_MESSAGE = "Waiting for a visible, idle application window."
 
 
 def bind(library, name, result, *arguments):
@@ -48,6 +54,7 @@ class Windows:
     def __init__(self):
         kernel = ct.WinDLL("kernel32", use_last_error=True)
         native = ct.WinDLL("ntdll")
+        user = ct.WinDLL("user32", use_last_error=True)
         pointer = ct.c_void_p
         size = ct.c_size_t
         self.open = bind(kernel, "OpenProcess", wt.HANDLE, wt.DWORD, wt.BOOL, wt.DWORD)
@@ -71,6 +78,14 @@ class Windows:
         self.resume = bind(native, "NtResumeProcess", wt.LONG, wt.HANDLE)
         self.mutex = bind(kernel, "CreateMutexW", wt.HANDLE,
                           pointer, wt.BOOL, wt.LPCWSTR)
+        self.exit_code = bind(kernel, "GetExitCodeProcess", wt.BOOL,
+                              wt.HANDLE, ct.POINTER(wt.DWORD))
+        self.input_idle = bind(user, "WaitForInputIdle", wt.DWORD, wt.HANDLE, wt.DWORD)
+        self.window_callback = ct.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+        self.windows = bind(user, "EnumWindows", wt.BOOL, self.window_callback, wt.LPARAM)
+        self.visible = bind(user, "IsWindowVisible", wt.BOOL, wt.HWND)
+        self.window_pid = bind(user, "GetWindowThreadProcessId", wt.DWORD,
+                               wt.HWND, ct.POINTER(wt.DWORD))
 
     def image_path(self, process):
         buffer = ct.create_unicode_buffer(PATH_CAPACITY)
@@ -96,12 +111,26 @@ class Windows:
                 pass
             finally:
                 self.close(process)
-        if len(matches) != 1:
+        if len(matches) > 1:
             raise RuntimeError(
                 f"Expected one running instance at {APP_PATH}; found {len(matches)}. "
-                "Open the original app and wait for its editor window first."
+                "Close extra instances before running the patcher."
             )
-        return matches[0]
+        return matches[0] if matches else None
+
+    def has_window(self, pid):
+        matches = []
+
+        @self.window_callback
+        def visit(window, parameter):
+            owner = wt.DWORD()
+            self.window_pid(window, ct.byref(owner))
+            if owner.value == pid and self.visible(window):
+                matches.append(window)
+            return True
+
+        require(self.windows(visit, 0))
+        return bool(matches)
 
     def image_base(self, process):
         modules = (wt.HMODULE * MODULE_CAPACITY)()
@@ -139,6 +168,34 @@ def guard(api, process, address):
     if normalized != ORIGINAL or value not in SUPPORTED_LIMITS:
         raise RuntimeError("Runtime code mismatch; no patch applied. Do not reuse older patch addresses.")
     return current, value
+
+
+def wait_ready(api, process, pid, deadline):
+    last_sample = None
+    stable = 0
+    reason = WAITING_MESSAGE
+    while time.monotonic() < deadline:
+        exit_code = wt.DWORD()
+        require(api.exit_code(process, ct.byref(exit_code)))
+        if exit_code.value != STILL_ACTIVE:
+            raise RuntimeError("Application exited before patching; no patch applied.")
+        try:
+            if api.input_idle(process, 0) != 0 or not api.has_window(pid):
+                raise RuntimeError(WAITING_MESSAGE)
+            address = api.image_base(process) + GETTER_RVA
+            current, _ = guard(api, process, address)
+            sample = (address, current)
+            stable = stable + 1 if sample == last_sample else 1
+            last_sample = sample
+            if stable >= STABLE_SAMPLES:
+                return address
+            reason = "Waiting for stable matching runtime code."
+        except (OSError, RuntimeError) as error:
+            reason = str(error)
+            last_sample = None
+            stable = 0
+        time.sleep(POLL_SECONDS)
+    raise RuntimeError(f"Startup timed out; no patch applied. {reason}")
 
 
 def patch(api, process, address):
@@ -192,20 +249,26 @@ def main():
     try:
         if already_exists:
             raise RuntimeError("Another copy of this patcher is running.")
+        print("Waiting for Synthesizer V to start. Do not edit or start playback until patching completes.")
+        deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
         pid = api.find_process()
+        while pid is None and time.monotonic() < deadline:
+            time.sleep(POLL_SECONDS)
+            pid = api.find_process()
+        if pid is None:
+            raise RuntimeError("Startup timed out: no matching application process found.")
         process = require(api.open(PROCESS_ACCESS, False, pid))
         try:
             if api.image_path(process) != APP_PATH:
                 raise RuntimeError("Process identity changed; refusing to patch.")
-            address = api.image_base(process) + GETTER_RVA
+            address = wait_ready(api, process, pid, deadline)
+            if api.find_process() != pid:
+                raise RuntimeError("Process selection changed; refusing to patch.")
             _, previous = guard(api, process, address)
             label = "unlimited (-1)" if LIMIT == -1 else str(LIMIT)
             print(f"Target: {APP_PATH}\nPID: {pid}\nLocal voice note cap: {previous} -> {label}")
-            print("Experimental runtime-only patch. Save your work and stop playback/rendering.")
+            print("Experimental runtime-only patch; applying automatically.")
             print("Warning text, expiry, internet requirements and export restrictions are unchanged.")
-            if input("Type APPLY to continue: ").strip() != "APPLY":
-                print("Cancelled; no changes made.")
-                return
             previous = patch(api, process, address)
             print(f"Local voice note-cap immediate: {previous} -> {label}; memory readback verified.")
             print("EXE unchanged. Reselect the voice or reopen the project to refresh cached state.")
@@ -219,5 +282,5 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, RuntimeError, KeyboardInterrupt, EOFError) as error:
+    except (OSError, RuntimeError, KeyboardInterrupt) as error:
         raise SystemExit(f"Stopped: {error}")
