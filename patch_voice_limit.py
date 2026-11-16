@@ -11,6 +11,15 @@ APP_PATH = Path(r"C:\Program Files\Synthesizer V Studio 2 Pro\synthv-studio.exe"
 EXPECTED_SHA256 = "37592b7d3c41ffaf0491b6b335ee630a34f03416b85fe9081021e6981eb5c2d3"
 LIMIT = -1
 SUPPORTED_LIMITS = (-1, 9999, 40)
+ENABLE_TRIAL_RENDERING = True
+RENDER_PATCHES = (
+    ("trial render control", 0xBC64FC,
+     bytes.fromhex("83bc2490000000017475488d4c2460e8e032d0ff90488b5c24284885db74298b")),
+    ("trial export mute list", 0x98B0CC,
+     bytes.fromhex("83bc2490000000017456488d4c2460e810e7f3ff90488b5c24284885db742fb8")),
+)
+BRANCH_DISPLACEMENT_OFFSET = 9
+FALLTHROUGH_DISPLACEMENT = b"\x00"
 GETTER_RVA = 0x8C1EC0
 IMMEDIATE_OFFSET = 0x76
 ORIGINAL = bytes.fromhex(
@@ -170,6 +179,20 @@ def guard(api, process, address):
     return current, value
 
 
+def render_guards(api, process, base):
+    snapshots = []
+    offset = BRANCH_DISPLACEMENT_OFFSET
+    for name, rva, original in RENDER_PATCHES:
+        current = api.read_bytes(process, base + rva, len(original))
+        normalized = current[:offset] + original[offset:offset + 1] + current[offset + 1:]
+        if normalized != original or current[offset:offset + 1] not in (
+            original[offset:offset + 1], FALLTHROUGH_DISPLACEMENT
+        ):
+            raise RuntimeError(f"Runtime code mismatch at {name}; refusing to patch.")
+        snapshots.append(current)
+    return tuple(snapshots)
+
+
 def wait_ready(api, process, pid, deadline):
     last_sample = None
     stable = 0
@@ -184,7 +207,8 @@ def wait_ready(api, process, pid, deadline):
                 raise RuntimeError(WAITING_MESSAGE)
             address = api.image_base(process) + GETTER_RVA
             current, _ = guard(api, process, address)
-            sample = (address, current)
+            rendering = render_guards(api, process, address - GETTER_RVA)
+            sample = (address, current, rendering)
             stable = stable + 1 if sample == last_sample else 1
             last_sample = sample
             if stable >= STABLE_SAMPLES:
@@ -198,34 +222,53 @@ def wait_ready(api, process, pid, deadline):
     raise RuntimeError(f"Startup timed out; no patch applied. {reason}")
 
 
+def write_protected(api, process, address, data):
+    old_protection = wt.DWORD()
+    require(api.protect(process, address, len(data),
+                        PAGE_EXECUTE_READWRITE, ct.byref(old_protection)))
+    try:
+        api.write_bytes(process, address, data)
+    finally:
+        ignored = wt.DWORD()
+        if not api.protect(process, address, len(data),
+                           old_protection.value, ct.byref(ignored)):
+            raise RuntimeError("Page protection restoration failed; restart the app before using it.")
+
+
 def patch(api, process, address):
     status = api.suspend(process)
     if status < 0:
         raise RuntimeError(f"Cannot suspend target: NTSTATUS {status & 0xFFFFFFFF:#x}")
     try:
         current, previous = guard(api, process, address)
-        if previous == LIMIT:
-            return previous
-        location = address + IMMEDIATE_OFFSET
-        old_protection = wt.DWORD()
-        require(api.protect(process, location, IMMEDIATE_SIZE,
-                            PAGE_EXECUTE_READWRITE, ct.byref(old_protection)))
+        base = address - GETTER_RVA
+        rendering = render_guards(api, process, base)
+        changes = [(address + IMMEDIATE_OFFSET,
+                    current[IMMEDIATE_OFFSET:IMMEDIATE_OFFSET + IMMEDIATE_SIZE],
+                    struct.pack("<i", LIMIT))]
+        offset = BRANCH_DISPLACEMENT_OFFSET
+        for (_, rva, original), snapshot in zip(RENDER_PATCHES, rendering):
+            desired = FALLTHROUGH_DISPLACEMENT if ENABLE_TRIAL_RENDERING else original[offset:offset + 1]
+            changes.append((base + rva + offset, snapshot[offset:offset + 1], desired))
+        attempted = []
         try:
-            try:
-                api.write_bytes(process, location, struct.pack("<i", LIMIT))
-                guard(api, process, address)
-            except BaseException:
+            for location, before, after in changes:
+                if before != after:
+                    attempted.append((location, before))
+                    write_protected(api, process, location, after)
+            guard(api, process, address)
+            render_guards(api, process, base)
+        except BaseException:
+            failures = []
+            for location, before in reversed(attempted):
                 try:
-                    api.write_bytes(process, location,
-                                    current[IMMEDIATE_OFFSET:IMMEDIATE_OFFSET + IMMEDIATE_SIZE])
+                    write_protected(api, process, location, before)
                 except BaseException as error:
-                    raise RuntimeError("Rollback failed; close and restart the app before using it.") from error
-                raise
-        finally:
-            ignored = wt.DWORD()
-            if not api.protect(process, location, IMMEDIATE_SIZE,
-                               old_protection.value, ct.byref(ignored)):
-                raise RuntimeError("Page protection restoration failed; restart the app before using it.")
+                    failures.append(str(error))
+            if failures:
+                raise RuntimeError("Rollback failed; close and restart the app before using it. "
+                                   + "; ".join(failures))
+            raise
         return previous
     finally:
         status = api.resume(process)
@@ -268,10 +311,12 @@ def main():
             label = "unlimited (-1)" if LIMIT == -1 else str(LIMIT)
             print(f"Target: {APP_PATH}\nPID: {pid}\nLocal voice note cap: {previous} -> {label}")
             print("Experimental runtime-only patch; applying automatically.")
-            print("Warning text, expiry, internet requirements and export restrictions are unchanged.")
+            print("Expiry, internet requirements and engine authorization are unchanged.")
             previous = patch(api, process, address)
             print(f"Local voice note-cap immediate: {previous} -> {label}; memory readback verified.")
-            print("EXE unchanged. Reselect the voice or reopen the project to refresh cached state.")
+            rendering_label = "bypassed" if ENABLE_TRIAL_RENDERING else "restored"
+            print(f"Local trial render-control and export-mute gates: {rendering_label}; memory readback verified.")
+            print("EXE unchanged. Reselect the track/voice and reopen the render/export dialog to refresh cached state.")
             print("Repeat after each app restart. Audio behavior has not been validated.")
         finally:
             api.close(process)
